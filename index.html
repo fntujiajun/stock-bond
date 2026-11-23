@@ -148,7 +148,7 @@ ol.prin b{color:var(--ink2);font-weight:600}
 </head>
 <body>
 <div class="app">
-<!-- build 11-23 08:58 -->
+<!-- build 11-23 09:08 -->
   <div class="nav">
     <div>
       <h1>股债比价</h1>
@@ -841,6 +841,22 @@ initToday();
 buildBuyList();
 bindChart();
 applyRange(250);
+
+/* 打开页面后拉一次同源的 data.json；有更新就替换重画。
+   这样任何人打开网页看到的都是最新数据，不需要定时任务。 */
+(function () {
+  if (window.__sbAutoLoad || !window.fetch) return;
+  window.__sbAutoLoad = 1;
+  fetch('data.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (nd) {
+      if (!nd || !nd.z || !nd.updated) return;
+      if (String(nd.updated) <= String(D.updated)) return;
+      D = nd;
+      try { initToday(); buildBuyList(); applyRange(250); drawZ(); } catch (e) {}
+    })
+    .catch(function () {});
+})();
 </script>
 </body>
 </html>
