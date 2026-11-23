@@ -7,11 +7,12 @@
 退出码：0=已更新  2=已是最新  3=探测失败
 """
 import json, math, os, re, sys, datetime, urllib.request
-from fetch_data import stock, bond, ymd
+from verify_worker import stock, bond, stock_sh, ymd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.dirname(HERE)          # 仓库根目录
 PATH = os.path.join(OUT, "index.html")
+os.makedirs(OUT, exist_ok=True)
 
 CSI = "https://www.csindex.com.cn/csindex-home/perf/index-perf"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -58,11 +59,28 @@ if "--if-new" in sys.argv:
         sys.exit(2)
     print(f"new-data {new} (page had {cur})")
 
-s, b = stock(), bond()
+s, b, sh = stock(), bond(), stock_sh()
 if not s or not b:
     sys.exit("数据抓取失败")
 bm = {ymd(int(k)): v for k, v in b.items()}
 dates = sorted(k for k in s if k in bm and s[k] is not None and bm[k] is not None)
+
+# 上证指数按日期对齐，缺失的用前一个交易日收盘价填充
+sh_map, last_sh = {}, None
+for k in sorted(sh):
+    if sh[k] is not None:
+        last_sh = sh[k]
+        sh_map[k] = last_sh
+sh_aligned = []
+_prev = None
+for k in dates:
+    if k in sh_map:
+        _prev = sh_map[k]
+    sh_aligned.append(_prev)
+_first = next((v for v in sh_aligned if v is not None), None)
+if _first is not None:
+    sh_aligned = [v if v is not None else _first for v in sh_aligned]
+print(f"[上证] 对齐后 {len(sh_aligned)} 个点，缺失 {sum(1 for v in sh_aligned if v is None)} 个")
 R = [s[k] / bm[k] for k in dates]
 n, W = len(R), 500
 
@@ -101,6 +119,7 @@ payload = {
     "z": [round(z[i], 3) for i in idx],
     "r": [round(R[i], 3) for i in idx],
     "s": [round(s[dates[i]], 1) for i in idx],
+    "u": [round(sh_aligned[i], 1) if sh_aligned[i] is not None else 0 for i in idx],
     "now": {
         "z": round(z[-1], 2),
         "toBuy": round(to_buy * 100, 1),
@@ -121,7 +140,7 @@ HTML = r"""<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f4f1" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)">
-<title>股债比价 · 原型</title>
+<title>股债比价</title>
 <style>
 :root{
   color-scheme:light dark;
@@ -136,6 +155,9 @@ HTML = r"""<!doctype html>
   --shadow:0 1px 2px rgba(0,0,0,.045);
   --chart-ink:#2b2135; --chart-axis:#7c7c84; --chart-grid:#eae7e0;
   --band-buy:rgba(23,118,74,.10); --band-sell:rgba(199,72,48,.10);
+  --chart-alt:#9bb8d6;
+  --chart-alt2:#dfb28a;
+  --tap-bg:rgba(255,255,255,.86);
 }
 @media (prefers-color-scheme: dark){
   :root{
@@ -150,6 +172,9 @@ HTML = r"""<!doctype html>
     --shadow:none;
     --chart-ink:#eae8f0; --chart-axis:#9a99a2; --chart-grid:#2e2e34;
     --band-buy:rgba(78,207,146,.13); --band-sell:rgba(255,120,98,.13);
+    --chart-alt:#6f9bc4;
+    --chart-alt2:#d09a6a;
+    --tap-bg:rgba(27,27,30,.86);
   }
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -196,7 +221,7 @@ body{background:var(--outer);color:var(--ink);font-family:-apple-system,BlinkMac
 canvas{display:block;width:100%}
 #cvz{touch-action:none;cursor:crosshair}
 .cvwrap{position:relative}
-.tap{position:absolute;left:0;right:0;bottom:7px;text-align:center;font-size:10.5px;color:var(--fainter);pointer-events:none;opacity:1;transition:opacity .45s}
+.tap{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);white-space:nowrap;font-size:10.5px;color:var(--faint);background:var(--tap-bg);padding:5px 11px;border-radius:9px;pointer-events:none;opacity:1;transition:opacity .45s;box-shadow:0 1px 3px rgba(0,0,0,.07)}
 .tap.hide{opacity:0}
 .ranges{display:flex;gap:4px;margin:0 0 10px}
 .ranges button{flex:1 1 0;min-width:0;border:0;background:var(--chip);color:var(--muted);font-size:10.5px;padding:5px 0;border-radius:8px;font-family:inherit;font-weight:500;cursor:pointer;line-height:1.5}
@@ -206,6 +231,21 @@ canvas{display:block;width:100%}
 #morebtn{color:var(--muted)}
 .cinfo{font-size:12.5px;color:var(--muted);height:19px;margin:0 0 8px;white-space:nowrap;overflow:hidden;font-variant-numeric:tabular-nums}
 .cinfo b{color:var(--ink);font-weight:650}
+.lg{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+.lgbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;background:var(--chip);
+  color:var(--ink2);font-size:11.5px;font-weight:500;padding:6px 11px;border-radius:9px;font-family:inherit;
+  cursor:pointer;line-height:1.2;transition:background .18s,border-color .18s,color .18s}
+.lgbtn i{width:14px;height:3px;border-radius:2px;display:inline-block;flex:0 0 auto}
+.lgbtn .ls{background:var(--chart-alt)}
+.lgbtn .lu{background:var(--chart-alt2)}
+.lgbtn .yes,.lgbtn .no{font-size:11px;font-weight:700;line-height:1;margin-left:1px}
+.lgbtn .yes{color:var(--buy-fg)}
+.lgbtn .no{display:none;color:var(--fainter)}
+.lgbtn:not(.on){background:transparent;border:1px dashed var(--fainter);color:var(--fainter)}
+.lgbtn:not(.on) i{opacity:.35}
+.lgbtn:not(.on) .yes{display:none}
+.lgbtn:not(.on) .no{display:inline}
+.lghint{text-align:center;font-size:10px;color:var(--fainter);margin-top:6px}
 
 .fold{padding:0}
 .foldhead{display:flex;align-items:center;justify-content:space-between;padding:14px;cursor:pointer}
@@ -242,9 +282,10 @@ ol.prin b{color:var(--ink2);font-weight:600}
 </head>
 <body>
 <div class="app">
+<!-- build __BUILD__ -->
   <div class="nav">
     <div>
-      <h1>股债比价<span class="badge">原型 v13 · __BUILD__</span></h1>
+      <h1>股债比价</h1>
       <div class="meta" id="asof"></div>
     </div>
     <button class="aboutbtn" id="aboutbtn">说明</button>
@@ -275,7 +316,7 @@ ol.prin b{color:var(--ink2);font-weight:600}
     </div>
 
     <div class="panel">
-      <h2>z 值走势<em id="vrangelab">近 1 年</em><em id="rchg"></em></h2>
+      <h2>z 值走势<em id="vrangelab">1年</em><em id="rchg"></em></h2>
       <div class="ranges" id="ranges">
         <button data-k="250" class="on">1年</button>
         <button data-k="500">2年</button>
@@ -295,6 +336,10 @@ ol.prin b{color:var(--ink2);font-weight:600}
       <div class="cvwrap">
         <canvas id="cvz" data-h="290"></canvas>
         <div class="tap" id="taphint">← 左右看日期　上下看数值 →</div>
+      </div>
+      <div class="lg" id="lg">
+        <button class="lgbtn on" data-k="s" title="点击显示或隐藏"><i class="ls"></i>沪深300<b class="yes">✓</b><b class="no">+</b></button>
+        <button class="lgbtn" data-k="u" title="点击显示或隐藏"><i class="lu"></i>上证指数<b class="yes">✓</b><b class="no">+</b></button>
       </div>
     </div>
 
@@ -338,7 +383,7 @@ ol.prin b{color:var(--ink2);font-weight:600}
           <p>正式版每次打开自动拉取，服务端缓存 10 分钟。中债指数收盘后发布，盘中看到的是上一交易日数值。</p>
 
           <h3>数据</h3>
-          <p class="dim">中证指数官网 · 中国债券信息网。本原型为静态快照，覆盖 <span id="snapfrom"></span> 至今，截至 <span id="snap2"></span>。</p>
+          <p class="dim">中证指数官网 · 中国债券信息网。本页面为静态快照，覆盖 <span id="snapfrom"></span> 至今，截至 <span id="snap2"></span>。</p>
         </div>
         <div class="warn">仅为个人研究记录，不构成投资建议。历史规律不保证未来重现，据此操作风险自负。</div>
       </div>
@@ -353,7 +398,8 @@ var D = __DATA__;
 var N = D.z.length;
 var PAD = {l:5, r:52, t:14, b:30};
 var V = {a:0, b:1};
-var hover = null, hoverY = null, drag = null, pinch = null, curK = 250, sxy = null, lastTap = null;
+var hover = null, hoverY = null, drag = null, pinch = null, sxy = null, lastTap = null;
+var showS = true, showU = false;
 
 function pad2(v){ return v<10 ? '0'+v : ''+v; }
 function dOf(i){ return new Date((D.d0 + D.d[i]) * 86400000); }
@@ -367,6 +413,35 @@ function dayChg(i){
   if(i <= 0 || D.r[i-1] == null) return 0;
   return D.r[i] / D.r[i-1] - 1;
 }
+/* 手动缩放后，把高亮贴回最接近的那个档位（纯视觉，不动数据） */
+var PRESETS = [];
+var curPreset = 250;
+function syncPreset(){
+  if(!PRESETS.length) return;
+  var span = V.b - V.a;
+  var best = PRESETS[0], bestD = Infinity;
+  for(var i=0;i<PRESETS.length;i++){
+    var p = PRESETS[i];
+    var ps = (p.k === 0) ? (N - 1) : p.k;
+    var dd = Math.abs(Math.log((span + 1) / (ps + 1)));
+    if(dd < bestD){ bestD = dd; best = p; }
+  }
+  if(curPreset === best.k) return;   /* 没跨档就不动 DOM，避免抖动 */
+  curPreset = best.k;
+  PRESETS.forEach(function(p){ p.btn.classList.toggle('on', p === best); });
+  var el = document.getElementById('vrangelab');
+  if(el) el.textContent = best.text;
+  /* 命中的档位藏在「更多」里就自动展开，免得一个高亮的都没有 */
+  if(best.btn && best.btn.parentNode && best.btn.parentNode.id === 'ranges2'){
+    var r2 = document.getElementById('ranges2');
+    var mb = document.getElementById('morebtn');
+    if(r2 && !r2.classList.contains('open')){
+      r2.classList.add('open');
+      if(mb) mb.textContent = '收起';
+    }
+  }
+}
+
 /* 区间涨跌幅，写到标题右侧 */
 function setRangeChg(v){
   var el = document.getElementById('rchg');
@@ -393,6 +468,8 @@ function theme(){
     ink:    cssVar('--chart-ink', '#2b2135'),
     axis:   cssVar('--chart-axis', '#8f8f96'),
     grid:   cssVar('--chart-grid', '#eae7e0'),
+    alt:    cssVar('--chart-alt', '#9bb8d6'),
+    alt2:   cssVar('--chart-alt2', '#dfb28a'),
     buy:    cssVar('--band-buy', 'rgba(23,118,74,.10)'),
     sell:   cssVar('--band-sell', 'rgba(199,72,48,.10)'),
     buyFg:  cssVar('--buy-fg', '#17764a'),
@@ -457,6 +534,9 @@ function drawZ(){
   var pw=pr-pl, ph=pb-pt;
   if(pw<=10 || ph<=10) return;
 
+  /* 缩放/平移后十字线若已跑出视野，就清掉，免得顶部日期和图对不上 */
+  if(hover != null && (hover < V.a - 0.5 || hover > V.b + 0.5)){ hover = null; hoverY = null; }
+
   var i0 = Math.max(0, Math.floor(V.a)), i1 = Math.min(N-1, Math.ceil(V.b));
   var lo=Infinity, hi=-Infinity;
   for(var i=i0;i<=i1;i++){ var v=D.z[i]; if(v<lo) lo=v; if(v>hi) hi=v; }
@@ -483,6 +563,49 @@ function drawZ(){
     ctx.strokeStyle=C.grid; ctx.lineWidth=1;
     var y0 = Math.round(Y(0)) + 0.5;
     ctx.beginPath(); ctx.moveTo(pl,y0); ctx.lineTo(pr,y0); ctx.stroke();
+  }
+
+  /* 叠加线：沪深300 / 上证指数，共用一根缩放刻度，只看形状 */
+  var oLo=Infinity, oHi=-Infinity;
+  for(var oi=i0;oi<=i1;oi++){
+    var a1=D.s[oi], a2=D.u[oi];
+    if(a1>0){ if(a1<oLo)oLo=a1; if(a1>oHi)oHi=a1; }
+    if(a2>0){ if(a2<oLo)oLo=a2; if(a2>oHi)oHi=a2; }
+  }
+  if(oHi > oLo){
+    var insO = ph * 0.06, spanO = oHi - oLo, ppdO = (i1 - i0) / pw;
+    var drawOverlay = function(arr, color){
+      ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.globalAlpha=0.95;
+      ctx.lineJoin='round'; ctx.lineCap='round';
+      ctx.beginPath();
+      if(ppdO > 1.8){
+        var colsO = Math.ceil(pw), startedO = false;
+        for(var cO=0;cO<colsO;cO++){
+          var iaO = i0 + Math.floor(cO/colsO*(i1-i0));
+          var ibO = i0 + Math.floor((cO+1)/colsO*(i1-i0));
+          if(ibO <= iaO) ibO = iaO+1;
+          var lastO = 0;
+          for(var qO=iaO;qO<ibO && qO<=i1;qO++){ if(arr[qO] > 0) lastO = arr[qO]; }
+          if(!lastO) continue;
+          var xO = pl + cO + 0.5;
+          var yO = pt + insO + (oHi - lastO)/spanO*(ph - insO*2);
+          if(!startedO){ ctx.moveTo(xO,yO); startedO = true; } else ctx.lineTo(xO,yO);
+        }
+      } else {
+        var stO = false;
+        for(var sO=i0;sO<=i1;sO++){
+          var vO = arr[sO];
+          if(!(vO > 0)) continue;
+          var xO2 = X(sO);
+          var yO2 = pt + insO + (oHi - vO)/spanO*(ph - insO*2);
+          if(!stO){ ctx.moveTo(xO2,yO2); stO = true; } else ctx.lineTo(xO2,yO2);
+        }
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    if(showU) drawOverlay(D.u, C.alt2);
+    if(showS) drawOverlay(D.s, C.alt);
   }
 
   var ppd = (i1 - i0) / pw;
@@ -551,6 +674,7 @@ function drawZ(){
   /* 区间涨跌幅 + 锚点先算出来，横轴标签要用 */
   var ia = Math.max(0, Math.floor(V.a)), ib2 = Math.min(N-1, Math.floor(V.b));
   setRangeChg(ib2 > ia ? D.r[ib2] / D.r[ia] - 1 : 0);
+  syncPreset();
 
   var anc = anchorIdx(), ax = X(anc), ay = Y(D.z[anc]);
 
@@ -621,7 +745,7 @@ function drawZ(){
   ctx.beginPath(); ctx.arc(ax,ay,4.5,0,7); ctx.fillStyle=C.ink; ctx.fill();
   ctx.beginPath(); ctx.arc(ax,ay,1.9,0,7); ctx.fillStyle=C.panel; ctx.fill();
 
-  if(hover == null) setInfo(anc);
+  setInfo(hover == null ? anc : hover);
 }
 
 function setInfo(i){
@@ -647,7 +771,6 @@ function fmt300(v){
 }
 
 function applyRange(k){
-  curK = k;
   if(!k || k >= N-1){ V.a = 0; V.b = N-1; }
   else { V.b = N-1; V.a = Math.max(0, N-1-k); }
   hover = null; hoverY = null; drawZ();
@@ -692,7 +815,7 @@ function bindChart(){
     zoomAt(e.clientX - r.left, e.deltaY > 0 ? 1.18 : 0.85, r.width);
     hideTap();
   }, {passive:false});
-  cv.addEventListener('dblclick', function(){ applyRange(curK); });
+  cv.addEventListener('dblclick', function(){ applyRange(curPreset); });
 
   cv.addEventListener('touchstart', function(e){
     var r = cv.getBoundingClientRect(); hideTap();
@@ -738,7 +861,7 @@ function bindChart(){
       var t = e.changedTouches[0], now = Date.now();
       if(lastTap && now - lastTap.t < 320
          && Math.abs(t.clientX - lastTap.x) < 24 && Math.abs(t.clientY - lastTap.y) < 24){
-        lastTap = null; applyRange(curK);
+        lastTap = null; applyRange(curPreset);
       } else {
         lastTap = {t: now, x: t.clientX, y: t.clientY};
       }
@@ -755,12 +878,31 @@ function bindChart(){
       moreBtn.textContent = open ? '收起' : '更多';
     });
   }
+  PRESETS = Array.prototype.map.call(
+    document.querySelectorAll('.ranges button[data-k]'),
+    function(b){ return { k: parseInt(b.getAttribute('data-k'), 10) || 0, btn: b, text: b.textContent }; }
+  );
+  PRESETS.forEach(function(p){ if(p.k === curPreset) p.btn.classList.add('on'); });
+
   document.querySelectorAll('.ranges button[data-k]').forEach(function(btn){
     btn.addEventListener('click', function(){
       document.querySelectorAll('.ranges button[data-k]').forEach(function(b){ b.classList.remove('on'); });
       btn.classList.add('on');
-      document.getElementById('vrangelab').textContent = btn.textContent;
+      var lab = document.getElementById('vrangelab');
+      if(lab) lab.textContent = btn.textContent;
+      curPreset = parseInt(btn.getAttribute('data-k'), 10) || 0;
+
       applyRange(parseInt(btn.getAttribute('data-k'), 10) || 0);
+    });
+  });
+
+  /* 图例开关：点一下显示/隐藏那条线 */
+  document.querySelectorAll('.lgbtn').forEach(function(el){
+    el.addEventListener('click', function(){
+      var k = el.getAttribute('data-k');
+      if(k === 's') showS = !showS; else showU = !showU;
+      el.classList.toggle('on', k === 's' ? showS : showU);
+      drawZ();
     });
   });
 }
@@ -773,9 +915,9 @@ function initToday(){
   el.style.color = z<=-1.5 ? 'var(--buy-fg)' : (z>=1.0 ? 'var(--sell-fg)' : 'var(--ink)');
 
   var st = document.getElementById('status');
-  if(z<=-1.5){ st.textContent='买入区 · 该动手了'; st.className='status s-buy'; }
-  else if(z>=1.0){ st.textContent='卖出区 · 该走了'; st.className='status s-sell'; }
-  else { st.textContent='中间地带 · 什么都不做'; st.className='status s-mid'; }
+  if(z<=-1.5){ st.textContent='买入区 · 建议分批买入'; st.className='status s-buy'; }
+  else if(z>=1.0){ st.textContent='卖出区 · 建议分批卖出'; st.className='status s-sell'; }
+  else { st.textContent='中间地带 · 建议不动'; st.className='status s-mid'; }
 
   var lo=-2.5, hi=3.0, pp=Math.max(2, Math.min(98, (z-lo)/(hi-lo)*100));
   setTimeout(function(){ document.getElementById('ptr').style.left = pp+'%'; }, 60);
